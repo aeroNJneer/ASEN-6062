@@ -423,7 +423,7 @@ def Euler_collinear_acceleration():
 
     # TEST - use the Euler collinear central configuration for equal masses to verify the implementation
     # masses sum to 1, G=1 in the equations
-    masses = [1/6, 1/3, 1/2]
+    masses = [1/3, 1/3, 1/3]
 
     # Place three equal masses on the x-axis at -a, 0, +a (symmetric Euler collinear)
     a = 1.0
@@ -558,5 +558,132 @@ def problem_1c():
     plot_conservation(times, pos_ts, vel_ts, masses, energies, angular_momenta)
     plt.show()
 
-# Euler_collinear_acceleration()
-problem_1c()
+# now verify that this works for a 5 body model; use solar system as model
+def problem_2a():
+    # Example 5-body system: Sun, Jupiter, Saturn, Uranus, Neptune (normalized)
+    masses = np.array([1.0, 9.5458e-4, 2.858e-4, 4.366e-5, 5.15e-5], dtype=float)
+    masses /= masses.sum()
+
+    # Approximate initial positions (AU) and velocities (AU/yr) for a snapshot in time
+    pos = np.array([
+        [0.0, 0.0, 0.0],  # Sun
+        [5.2, 0.0, 0.0],   # Jupiter
+        [9.5, 0.0, 0.0],   # Saturn
+        [19.2, 0.0, 0.0],  # Uranus
+        [30.1, 0.0, 0.0],  # Neptune
+    ], dtype=float)
+
+    # Circular velocities consistent with G=1:
+    # v = sqrt(G * M_sun / r) = sqrt(masses[0] / r)
+    G = 1.0
+    vel = np.zeros_like(pos)
+    for i in range(1, len(masses)):
+        r = np.linalg.norm(pos[i] - pos[0])
+        v_circ = np.sqrt(G * masses[0] / r)
+        vel[i] = np.array([0.0, v_circ, 0.0])
+
+    # Shift to center of mass frame
+    com_pos = np.sum(pos * masses[:, None], axis=0) / masses.sum()
+    com_vel = np.sum(vel * masses[:, None], axis=0) / masses.sum()
+    pos -= com_pos
+    vel -= com_vel
+
+    # Integration settings: simulate for one Jupiter orbital period
+    # With G=1: T = 2*pi * r^(3/2) / sqrt(G * M_sun)
+    r_jupiter = 5.2
+    T = 2 * np.pi * r_jupiter**1.5 / np.sqrt(G * masses[0])
+    t_span = (0.0, T)
+    dt = T / 10000
+
+    times, pos_ts, vel_ts, energies, angular_momenta = simulate_and_check_conservation(pos, vel, masses, t_span, dt)
+
+    print(f"5-body simulation: T={T:.3f} (normalized units)")
+    print(f"Energy: min={energies.min():.3e}, max={energies.max():.3e}, rel change={(energies.max()-energies.min())/np.abs(energies[0]):.3e}")
+    L_mags = np.linalg.norm(angular_momenta, axis=1)   
+    print(f"Angular Momentum: min={L_mags.min():.3e}, max={L_mags.max():.3e}, rel change={(L_mags.max()-L_mags.min())/np.abs(L_mags[0]):.3e}")
+    plot_trajectories(pos_ts, masses)
+    plot_conservation(times, pos_ts, vel_ts, masses, energies, angular_momenta)
+    plt.show()
+
+
+# Run the test for the 5BP using a pentagon configuration
+def problem_2b():
+    G = 1.0
+    # Five equal masses at the vertices of a regular pentagon, with velocities for rigid rotation
+    N = 5
+    masses = np.ones(N) / N
+    radius = 1.0
+    pos_pentagon = np.array([[radius * np.cos(2 * np.pi * i / N), radius * np.sin(2 * np.pi * i / N), 0.0] for i in range(N)])
+    omega = np.sqrt(G * masses.sum() / radius**3)
+    vel_pentagon = np.zeros_like(pos_pentagon)
+    for i in range(N):
+        r_vec = pos_pentagon[i]
+        vel_pentagon[i] = np.array([-omega * r_vec[1], omega * r_vec[0], 0.0])  # Perpendicular to r_vec for rigid rotation
+
+    T = 2 * np.pi / omega
+    t_span = (0.0, T)
+    dt = T / 10000
+
+    times, pos_ts, vel_ts, energies, angular_momenta = simulate_and_check_conservation(pos_pentagon, vel_pentagon, masses, t_span, dt)
+
+    print(f"Pentagon configuration: T={T:.3f} (normalized units)")
+    print(f"Energy: min={energies.min():.3e}, max={energies.max():.3e}, rel change={(energies.max()-energies.min())/np.abs(energies[0]):.3e}")
+    L_mags = np.linalg.norm(angular_momenta, axis=1)   
+    print(f"Angular Momentum: min={L_mags.min():.3e}, max={L_mags.max():.3e}, rel change={(L_mags.max()-L_mags.min())/np.abs(L_mags[0]):.3e}")
+    plot_trajectories(pos_ts, masses)
+    plot_conservation(times, pos_ts, vel_ts, masses, energies, angular_momenta)
+    plt.show()
+
+# place 5 bodies on eccentric orbit = 0.1 around the center of mass 
+# with equidistant mean anomalies and velocities for rigid rotation; simulate and check conservation
+# start simulation at periapsis for 1st body and compute initial conditions for the others accordingly
+def problem_2c():
+    G = 1.0
+    N = 5
+    masses = np.ones(N) / N
+    a = 1.0  # semi-major axis
+    e = 0.1  # eccentricity
+
+    # Compute positions and velocities for each body on the eccentric orbit
+    pos_eccentric = np.zeros((N, 3))
+    vel_eccentric = np.zeros((N, 3))
+    for i in range(N):
+        M = 2 * np.pi * i / N  # mean anomaly
+        E = 0  # start at periapsis for the first body, so E=0 for i=0; others will be solved for M = E - e*sin(E)
+        for _ in range(10):  # Newton's method to solve Kepler's equation: M = E - e*sin(E)
+            f = E - e * np.sin(E) - M
+            f_prime = 1 - e * np.cos(E)
+            E -= f / f_prime
+
+        # True anomaly and radius
+        theta = 2 * np.arctan2(np.sqrt(1 + e) * np.sin(E / 2), np.sqrt(1 - e) * np.cos(E / 2))
+        r = a * (1 - e**2) / (1 + e * np.cos(theta))
+
+        pos_eccentric[i] = [r * np.cos(theta), r * np.sin(theta), 0.0]
+
+        # Velocity magnitude from vis-viva equation: v^2 = G*M*(2/r - 1/a)
+        v_mag = np.sqrt(G * masses.sum() * (2 / r - 1 / a))
+        vel_eccentric[i] = [-v_mag * np.sin(theta), v_mag * np.cos(theta), 0.0]
+
+    T = 2 * np.pi * a**1.5 / np.sqrt(G * masses.sum())
+
+    # use shorter time span
+    T = np.pi
+    t_span = (0.0, T)
+    dt = T / 10000
+
+    times, pos_ts, vel_ts, energies, angular_momenta = simulate_and_check_conservation(pos_eccentric, vel_eccentric, masses, t_span, dt)
+
+    print(f"Eccentric configuration: T={T:.3f} (normalized units)")
+    print(f"Energy: min={energies.min():.3e}, max={energies.max():.3e}, rel change={(energies.max()-energies.min())/np.abs(energies[0]):.3e}")
+    L_mags = np.linalg.norm(angular_momenta, axis=1)
+    print(f"Angular Momentum: min={L_mags.min():.3e}, max={L_mags.max():.3e}, rel change={(L_mags.max()-L_mags.min())/np.abs(L_mags[0]):.3e}")
+    plot_trajectories(pos_ts, masses)
+    plot_conservation(times, pos_ts, vel_ts, masses, energies, angular_momenta)
+    plt.show()
+
+
+
+
+
+problem_2c()
