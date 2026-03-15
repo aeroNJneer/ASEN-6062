@@ -40,6 +40,38 @@ def jacobi_coordinates(positions, masses):
     return jacobi_pos
 
 
+def reduced_masses(masses):
+    """
+    Compute the Jacobi reduced masses eta_i = M_i * m_{i+1} / M_{i+1}.
+
+    Following Scheeres' notation (Jacobi_Notation.pdf):
+      M_0 = 0, M_i = M_{i-1} + m_i  for i = 1, ..., N
+      eta_i = M_i * m_{i+1} / M_{i+1}  for i = 1, ..., N-1
+
+    Here the input masses array is 0-indexed: masses[0] = m_1, ..., masses[N-1] = m_N.
+
+    Parameters
+    ----------
+    masses : ndarray, shape (N,)
+        Masses of the N bodies (0-indexed).
+
+    Returns
+    -------
+    eta : ndarray, shape (N-1,)
+        Reduced masses for Jacobi coordinates i = 1, ..., N-1.
+    """
+    masses = np.array(masses, dtype=float)
+    N = len(masses)
+    # M[i] = sum of masses[0..i] (i.e., M_1, M_2, ..., M_N in Scheeres' notation)
+    M = np.cumsum(masses)
+    eta = np.zeros(N - 1)
+    for i in range(N - 1):
+        # eta_{i+1} in Scheeres' 1-indexed notation = M[i] * masses[i+1] / M[i+1]
+        # Here i is 0-indexed Jacobi index (R_1 corresponds to i=0 in eta)
+        eta[i] = M[i] * masses[i + 1] / M[i + 1]
+    return eta
+
+
 def jacobi_linear_transform(masses):
     """
     Return linear transform L (shape (N, N)) such that
@@ -73,67 +105,130 @@ def jacobi_linear_transform(masses):
                 L[i, j] = -masses[j] / total_prev
     return L
 
-# generate the EOM using jacobi coordinates
+
+def _potential_gradient_jacobi(jac_pos_rel, masses):
+    """
+    Compute -dU/dR_l for l = 1, ..., N-1 directly in Jacobi coordinates.
+
+    Uses the partial derivative formula from Scheeres (Jacobi_Notation.pdf).
+    For body pair (i, j) with i < j (1-indexed), the partial of the
+    separation vector r_{ij} w.r.t. Jacobi coordinate R_l is:
+
+        dr_{ij}/dR_l =  0                       l > j-1  or  l < i-1
+                        +I                       l = j-1
+                        (m_{l+1}/M_{l+1}) I      i-1 < l < j-1
+                        -(M_{i-1}/M_i) I         l = i-1
+
+    Mapping to 0-indexed bodies a < b  (a = i-1, b = j-1):
+        l = b    =>  +1
+        a < l < b => masses[l] / cum[l]
+        l = a    =>  -(cum[a-1] / cum[a])   (zero when a = 0)
+
+    The generalized force is then:
+        -dU/dR_l = sum_{a<b} F_{ab} * (dr_{ab}/dR_l)
+
+    where F_{ab} = G * m_a * m_b * r_{ab} / |r_{ab}|^3.
+
+    Parameters
+    ----------
+    jac_pos_rel : ndarray, shape (N-1, 3)
+        Jacobi relative positions R_1, ..., R_{N-1} (0-indexed as [0..N-2]).
+    masses : ndarray, shape (N,)
+        Masses of the N bodies (0-indexed).
+
+    Returns
+    -------
+    neg_dUdR : ndarray, shape (N-1, 3)
+        The generalized Jacobi force -dU/dR_l for l = 1, ..., N-1.
+    """
+    masses = np.array(masses, dtype=float)
+    N = len(masses)
+    d = jac_pos_rel.shape[1]
+    G = 1.0
+
+    cum = np.cumsum(masses)  # cum[k] = m_0 + ... + m_k
+
+    # Convert Jacobi -> inertial to get separation vectors
+    full_jac = np.zeros((N, d))
+    full_jac[1:] = jac_pos_rel
+    cart_pos = positions_from_jacobi(full_jac, masses)
+
+    neg_dUdR = np.zeros((N - 1, d))
+
+    for a in range(N):
+        for b in range(a + 1, N):
+            r_vec = cart_pos[b] - cart_pos[a]
+            r_mag = np.linalg.norm(r_vec)
+            if r_mag == 0:
+                continue
+            F_ab = G * masses[a] * masses[b] * r_vec / r_mag**3
+
+            # l = b: coefficient +1 (b >= 1 always since b > a >= 0)
+            neg_dUdR[b - 1] += F_ab
+
+            # l = a: coefficient -(cum[a-1]/cum[a]), only for a >= 1
+            if a >= 1:
+                neg_dUdR[a - 1] -= (cum[a - 1] / cum[a]) * F_ab
+
+            # a < l < b: coefficient masses[l]/cum[l]
+            for l in range(max(a + 1, 1), b):
+                neg_dUdR[l - 1] += (masses[l] / cum[l]) * F_ab
+
+    return neg_dUdR
+
+
+# generate the EOM using Lagrangian equations in Jacobi coordinates
 def equations_of_motion(t, y, masses):
     """
-    Compute the derivatives for the N-body problem in Jacobi coordinates.
+    Compute the derivatives for the N-body problem using the Lagrangian
+    formulation in Jacobi coordinates (Scheeres, Jacobi_Notation.pdf).
+
+    The state vector contains only the N-1 relative Jacobi coordinates
+    R_1, ..., R_{N-1} and their velocities (R_0 is the ignorable CoM
+    coordinate, fixed at the origin).
+
+    The Lagrangian is L = T - U where:
+      T = (1/2) sum_{i=1}^{N-1} eta_i * V_i . V_i
+      U = -G sum_{i<j} m_i m_j / |r_{ij}|
+
+    The EOM are:  eta_i * R_i'' = -dU/dR_i
+    or equivalently: R_i'' = (1/eta_i) * (-dU/dR_i)
 
     Parameters
     ----------
     t : float
-        Time variable (not used in this function but required for ODE solvers).
-    y : ndarray, shape (2*N*3,)
-        State vector containing positions and velocities in Jacobi coordinates.
+        Time variable (required by ODE solvers).
+    y : ndarray, shape (2*(N-1)*3,)
+        State vector: [R_1, ..., R_{N-1}, V_1, ..., V_{N-1}] flattened.
     masses : ndarray, shape (N,)
         Masses of the N bodies.
-    Returns
 
+    Returns
     -------
-    dydt : ndarray, shape (2*N*3,)
+    dydt : ndarray, shape (2*(N-1)*3,)
         Derivative of the state vector.
     """
+    masses = np.array(masses, dtype=float)
     N = len(masses)
+    n_rel = N - 1
+    dim = 3
 
-    # State `y` is in Jacobi coordinates: first N*3 entries are Jacobi positions
-    # and the next N*3 entries are Jacobi velocities.
-    jac_pos = y[:N*3].reshape((N, 3))
-    jac_vel = y[N*3:].reshape((N, 3))
+    state_size = n_rel * dim
+    jac_pos_rel = y[:state_size].reshape((n_rel, dim))   # R_1, ..., R_{N-1}
+    jac_vel_rel = y[state_size:].reshape((n_rel, dim))   # V_1, ..., V_{N-1}
+
+    # Compute the Jacobi reduced masses eta_i
+    eta = reduced_masses(masses)
+
+    # Compute the generalized Jacobi force: -dU/dR_l
+    neg_dUdR = _potential_gradient_jacobi(jac_pos_rel, masses)
+
+    # Jacobi accelerations: R_i'' = (1/eta_i) * (-dU/dR_i)
+    jac_acc_rel = neg_dUdR / eta[:, None]
 
     dydt = np.zeros_like(y)
-
-    # Gravitational constant in AU^3 / (yr^2 * solar_mass)
-    G = 1.0
-
-    # Convert Jacobi positions -> Cartesian positions to evaluate pairwise forces
-    cart_positions = positions_from_jacobi(jac_pos, masses)
-
-    # Compute Cartesian accelerations from pairwise gravity
-    cart_acc = np.zeros((N, 3))
-    for i in range(N):
-        a_i = np.zeros(3)
-        for j in range(N):
-            if i == j:
-                continue
-            r_vec = cart_positions[j] - cart_positions[i]
-            r_mag = np.linalg.norm(r_vec)
-            # guard against zero separation
-            if r_mag == 0:
-                continue
-            a_i += G * masses[j] * r_vec / r_mag**3
-        cart_acc[i] = a_i
-
-    # Map Cartesian accelerations into Jacobi accelerations using the linear
-    # transform L where jac_pos = L @ cart_positions (per-coordinate)
-    L = jacobi_linear_transform(masses)
-    # The mapping L is applied per Cartesian component (x, y, z). Because
-    # the Jacobi transform is linear in positions, the same L maps the
-    # Cartesian accelerations into Jacobi accelerations component-wise.
-    jac_acc = L.dot(cart_acc)
-
-    # derivatives: jacobi positions' derivative is jacobi velocities
-    dydt[:N*3] = jac_vel.flatten()
-    # jacobi velocities' derivative is jacobi accelerations
-    dydt[N*3:] = jac_acc.flatten()
+    dydt[:state_size] = jac_vel_rel.flatten()
+    dydt[state_size:] = jac_acc_rel.flatten()
 
     return dydt
 
@@ -199,7 +294,16 @@ def velocities_from_jacobi(jacobi_vel, masses):
 
 def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
     """
-    Simulate the N-body problem using Jacobi coordinates.
+    Simulate the N-body problem using the Lagrangian formulation in Jacobi
+    coordinates (Scheeres, Jacobi_Notation.pdf).
+
+    The integration is performed on the N-1 relative Jacobi coordinates
+    R_1, ..., R_{N-1} (the CoM coordinate R_0 is ignorable and fixed at the
+    origin). The EOM are:
+
+        eta_i * R_i'' = -dU/dR_i
+
+    where eta_i = M_i * m_{i+1} / M_{i+1} are the Jacobi reduced masses.
 
     Parameters
     ----------
@@ -225,13 +329,18 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
     """
     # Ensure masses is a numpy array
     masses = np.array(masses, dtype=float)
+    N = len(masses)
 
-    # Convert initial conditions to Jacobi coordinates for integration
+    # Convert initial conditions to Jacobi coordinates
     jacobi_pos = jacobi_coordinates(initial_positions, masses)
     jacobi_vel = jacobi_coordinates(initial_velocities, masses)
 
-    # Flatten initial conditions for ODE solver (Jacobi state)
-    y0 = np.hstack((jacobi_pos.flatten(), jacobi_vel.flatten()))
+    # Extract only the N-1 relative Jacobi coordinates (drop R_0, the CoM)
+    jac_pos_rel = jacobi_pos[1:]   # shape (N-1, 3)
+    jac_vel_rel = jacobi_vel[1:]   # shape (N-1, 3)
+
+    # Flatten initial conditions for ODE solver
+    y0 = np.hstack((jac_pos_rel.flatten(), jac_vel_rel.flatten()))
 
     # Time points for integration (inclusive endpoints, avoid floating-point overshoot)
     t0, t1 = t_span
@@ -254,18 +363,26 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
         atol=1e-14,
     )
 
-    N = len(masses)
     times = sol.t
-    M = len(times)
+    M_steps = len(times)
+    n_rel = N - 1
+    state_size = n_rel * 3
 
-    # Convert Jacobi solution back to Cartesian coordinates for each time
-    positions = np.zeros((M, N, 3))
-    velocities = np.zeros((M, N, 3))
-    for k in range(M):
-        jac_pos_k = sol.y[:N*3, k].reshape((N, 3))
-        jac_vel_k = sol.y[N*3:, k].reshape((N, 3))
-        positions[k] = positions_from_jacobi(jac_pos_k, masses)
-        velocities[k] = velocities_from_jacobi(jac_vel_k, masses)
+    # Convert Jacobi solution back to Cartesian coordinates for each time step
+    positions = np.zeros((M_steps, N, 3))
+    velocities = np.zeros((M_steps, N, 3))
+    for k in range(M_steps):
+        jac_pos_rel_k = sol.y[:state_size, k].reshape((n_rel, 3))
+        jac_vel_rel_k = sol.y[state_size:, k].reshape((n_rel, 3))
+
+        # Reconstruct full Jacobi arrays (R_0 = 0 in CoM frame)
+        jac_pos_full = np.zeros((N, 3))
+        jac_pos_full[1:] = jac_pos_rel_k
+        jac_vel_full = np.zeros((N, 3))
+        jac_vel_full[1:] = jac_vel_rel_k
+
+        positions[k] = positions_from_jacobi(jac_pos_full, masses)
+        velocities[k] = velocities_from_jacobi(jac_vel_full, masses)
 
     return times, positions, velocities
 
