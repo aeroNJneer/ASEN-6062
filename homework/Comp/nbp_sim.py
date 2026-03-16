@@ -490,12 +490,11 @@ def simulate_and_check_conservation(positions, velocities, masses, t_span, dt):
 def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=None, title=None):
     """
     Single-figure summary: trajectories, position components, and
-    conservation residuals arranged as a 3x2 grid of subplots.
+    conservation residuals arranged as a 2x2 grid of subplots.
 
-    Layout (3 rows x 2 columns):
-        [0,0] x-y trajectory          [0,1] residuals (E-E0, |L|-|L0|)
-        [1,0] x(t)                    [1,1] fractional change
-        [2,0] y(t)
+    Layout (2 rows x 2 columns):
+        [0,0] x-y trajectory          [0,1] x(t)
+        [1,0] residuals (E-E0, |L|-|L0|)  [1,1] y(t)
     """
     masses = np.asarray(masses, dtype=float)
     N = len(masses)
@@ -507,10 +506,10 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     if angular_momenta is None:
         angular_momenta = np.array([compute_angular_momentum(pos_ts[k], vel_ts[k], masses) for k in range(len(times))])
 
-    fig = plt.figure(figsize=(14, 10))
+    fig = plt.figure(figsize=(14, 8))
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold')
-    gs = fig.add_gridspec(3, 2, hspace=0.40, wspace=0.30, top=0.93)
+    gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.30, top=0.93)
 
     # --- (0,0) x-y trajectory ---
     ax_traj = fig.add_subplot(gs[0, 0])
@@ -527,8 +526,8 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     ax_traj.set_title('Trajectories (x-y plane)')
     ax_traj.grid(True, alpha=0.3)
 
-    # --- (1,0) x(t) ---
-    ax_x = fig.add_subplot(gs[1, 0])
+    # --- (0,1) x(t) ---
+    ax_x = fig.add_subplot(gs[0, 1])
     for i in range(N):
         ax_x.plot(times, pos_ts[:, i, 0], color=colors[i], lw=0.8, label=labels[i])
     ax_x.set_ylabel('x')
@@ -537,26 +536,14 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     ax_x.legend(fontsize=5, loc='upper right')
     ax_x.grid(True, alpha=0.3)
 
-    # --- (2,0) y(t) ---
-    ax_y = fig.add_subplot(gs[2, 0])
-    for i in range(N):
-        ax_y.plot(times, pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
-    ax_y.set_ylabel('y')
-    ax_y.set_xlabel('Time')
-    ax_y.set_title('y(t)')
-    ax_y.legend(fontsize=5, loc='upper right')
-    ax_y.grid(True, alpha=0.3)
-
     # --- Conservation quantities ---
     E_vals = energies
     L_vals = np.linalg.norm(angular_momenta, axis=1)
     E0, L0 = E_vals[0], L_vals[0]
     E_res, L_res = E_vals - E0, L_vals - L0
-    E_frac = E_res / np.abs(E0) if np.abs(E0) > 0 else E_res
-    L_frac = L_res / np.abs(L0) if np.abs(L0) > 0 else L_res
 
-    # --- (0,1) residuals ---
-    ax_res = fig.add_subplot(gs[0, 1])
+    # --- (1,0) residuals ---
+    ax_res = fig.add_subplot(gs[1, 0])
     ax_res.plot(times, E_res, label='E - E0')
     ax_res.plot(times, L_res, label='|L| - |L0|')
     ax_res.set_xlabel('Time')
@@ -565,15 +552,15 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     ax_res.legend(fontsize=7)
     ax_res.grid(True, alpha=0.3)
 
-    # --- (1,1) fractional change ---
-    ax_frac = fig.add_subplot(gs[1, 1])
-    ax_frac.plot(times, E_frac, label='ΔE / |E0|')
-    ax_frac.plot(times, L_frac, label='Δ|L| / |L0|')
-    ax_frac.set_xlabel('Time')
-    ax_frac.set_ylabel('Fractional Change')
-    ax_frac.set_title('Fractional Change of Energy and Angular Momentum')
-    ax_frac.legend(fontsize=7)
-    ax_frac.grid(True, alpha=0.3)
+    # --- (1,1) y(t) ---
+    ax_y = fig.add_subplot(gs[1, 1])
+    for i in range(N):
+        ax_y.plot(times, pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
+    ax_y.set_ylabel('y')
+    ax_y.set_xlabel('Time')
+    ax_y.set_title('y(t)')
+    ax_y.legend(fontsize=5, loc='upper right')
+    ax_y.grid(True, alpha=0.3)
 
 def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500):
     """
@@ -822,7 +809,7 @@ def problem_2c(n_orbits=1):
 
 
 if __name__ == '__main__':
-   # Euler_collinear_acceleration()
+    Euler_collinear_acceleration()
     # Perturb Earth's position by 0.1 AU in y
     # problem_1c(delta_pos_earth=[0.20, 0.00, 0.0])
     # problem_2c()
