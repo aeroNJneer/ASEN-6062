@@ -25,7 +25,7 @@ def jacobi_coordinates(positions, masses):
     M = np.cumsum(masses)
 
     N = len(masses)
-    jacobi_pos = np.zeros_like(positions)
+    jacobi_pos = np.zeros_like(positions+1)
 
     # First Jacobi coordinate: position of body 1 relative to body 0
     jacobi_pos[0] = positions[0]
@@ -36,7 +36,6 @@ def jacobi_coordinates(positions, masses):
         total_mass_prev = np.sum(masses[:i])
         com_prev = np.sum(positions[:i] * masses[:i, None], axis=0) / total_mass_prev
         jacobi_pos[i] = positions[i] - com_prev
-
     return jacobi_pos
 
 
@@ -104,7 +103,6 @@ def jacobi_linear_transform(masses):
             for j in range(i):
                 L[i, j] = -masses[j] / total_prev
     return L
-
 
 def _potential_gradient_jacobi(jac_pos_rel, masses):
     """
@@ -183,12 +181,11 @@ def _potential_gradient_jacobi(jac_pos_rel, masses):
 
     return neg_dUdR
 
-
 # generate the EOM using Lagrangian equations in Jacobi coordinates
 def equations_of_motion(t, y, masses):
     """
     Compute the derivatives for the N-body problem using the Lagrangian
-    formulation in Jacobi coordinates (Scheeres, Jacobi_Notation.pdf).
+    formulation in Jacobi coordinates
 
     The state vector contains only the N-1 relative Jacobi coordinates
     R_1, ..., R_{N-1} and their velocities (R_0 is the ignorable CoM
@@ -302,37 +299,12 @@ def velocities_from_jacobi(jacobi_vel, masses):
 def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
     """
     Simulate the N-body problem using the Lagrangian formulation in Jacobi
-    coordinates (Scheeres, Jacobi_Notation.pdf).
-
-    The integration is performed on the N-1 relative Jacobi coordinates
-    R_1, ..., R_{N-1} (the CoM coordinate R_0 is ignorable and fixed at the
-    origin). The EOM are:
+    coordinates. 
+    The EOM are:
 
         eta_i * R_i'' = -dU/dR_i
 
-    where eta_i = M_i * m_{i+1} / M_{i+1} are the Jacobi reduced masses.
-
-    Parameters
-    ----------
-    initial_positions : ndarray, shape (N, 3)
-        Initial Cartesian positions of N bodies in an inertial frame.
-    initial_velocities : ndarray, shape (N, 3)
-        Initial Cartesian velocities of N bodies in an inertial frame.
-    masses : ndarray, shape (N,)
-        Masses of the N bodies.
-    t_span : tuple
-        Time span for the simulation (t_start, t_end).
-    dt : float
-        Time step for the simulation.
-
-    Returns
-    -------
-    times : ndarray
-        Array of time points.
-    positions : ndarray, shape (M, N, 3)
-        Array of Cartesian positions at each time point.
-    velocities : ndarray, shape (M, N, 3)
-        Array of Cartesian velocities at each time point.
+    where eta_i = M_i * m_{i+1} / M_{i+1} are the Jacobi reduced masses
     """
     # Ensure masses is a numpy array
     masses = np.array(masses, dtype=float)
@@ -351,10 +323,6 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
 
     # Time points for integration (inclusive endpoints, avoid floating-point overshoot)
     t0, t1 = t_span
-    if t1 <= t0:
-        raise ValueError("t_span must have t_end > t_start")
-    if dt <= 0:
-        raise ValueError("dt must be positive")
     num_steps = max(2, int(np.floor((t1 - t0) / dt)) + 1)
     t_eval = np.linspace(t0, t1, num_steps)
 
@@ -366,8 +334,8 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
         args=(masses,),
         t_eval=t_eval,
         method='DOP853',
-        rtol=1e-12,
-        atol=1e-14,
+        rtol=1e-14,
+        atol=1e-16,
     )
 
     times = sol.t
@@ -487,63 +455,87 @@ def simulate_and_check_conservation(positions, velocities, masses, t_span, dt):
 
     return times, pos_ts, vel_ts, energies, angular_momenta
 
-def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=None, title=None):
+def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=None,
+                 title=None, test_particle_idx=None):
     """
-    Single-figure summary: trajectories, position components, and
-    conservation residuals arranged as a 2x2 grid of subplots.
+    Two-figure summary:
+      Figure 1: x-y trajectory (standalone)
+      Figure 2: x(t), y(t), conservation residuals (3 subplots)
 
-    Layout (2 rows x 2 columns):
-        [0,0] x-y trajectory          [0,1] x(t)
-        [1,0] residuals (E-E0, |L|-|L0|)  [1,1] y(t)
+    If test_particle_idx is not None, that body is drawn with a distinct
+    dashed black line and labelled 'Test Particle (CoG)'.
     """
     masses = np.asarray(masses, dtype=float)
     N = len(masses)
+    # Exclude test particle from mass-based label/color assignment
+    N_massive = N if test_particle_idx is None else N - 1
     labels = [f'Body {i+1} (m={masses[i]:.4g})' for i in range(N)]
-    colors = plt.cm.tab10(np.linspace(0, 1, max(N, 10)))[:N]
+    colors = plt.cm.tab10(np.linspace(0, 1, max(N_massive, 10)))[:N]
+    if test_particle_idx is not None:
+        labels[test_particle_idx] = 'Test Particle (CoG)'
 
     if energies is None:
         energies = np.array([compute_energy(pos_ts[k], vel_ts[k], masses) for k in range(len(times))])
     if angular_momenta is None:
         angular_momenta = np.array([compute_angular_momentum(pos_ts[k], vel_ts[k], masses) for k in range(len(times))])
 
-    fig = plt.figure(figsize=(14, 8))
+    # ===== Figure 1: Trajectory =====
+    fig1 = plt.figure(figsize=(8, 8))
     if title:
-        fig.suptitle(title, fontsize=14, fontweight='bold')
-    gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.30, top=0.93)
-
-    # --- (0,0) x-y trajectory ---
-    ax_traj = fig.add_subplot(gs[0, 0])
+        fig1.suptitle(title, fontsize=14, fontweight='bold')
+    ax_traj = fig1.add_subplot(111)
     for i in range(N):
-        ax_traj.plot(pos_ts[:, i, 0], pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
-        ax_traj.plot(pos_ts[0, i, 0], pos_ts[0, i, 1], 'o', color=colors[i],
-                     ms=4 + 6 * masses[i] / masses.max())
-        ax_traj.plot(pos_ts[-1, i, 0], pos_ts[-1, i, 1], '*', color=colors[i],
-                     ms=6 + 6 * masses[i] / masses.max())
+        if i == test_particle_idx:
+            ax_traj.plot(pos_ts[:, i, 0], pos_ts[:, i, 1], 'k', lw=1.5, label=labels[i])
+            ax_traj.plot(pos_ts[0, i, 0], pos_ts[0, i, 1], 'kD', ms=6)
+            ax_traj.plot(pos_ts[-1, i, 0], pos_ts[-1, i, 1], 'k*', ms=8)
+        else:
+            ax_traj.plot(pos_ts[:, i, 0], pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
+            ax_traj.plot(pos_ts[0, i, 0], pos_ts[0, i, 1], 'o', color=colors[i],
+                         ms=2 + 2 * masses[i] / masses[:N_massive].max())
+            ax_traj.plot(pos_ts[-1, i, 0], pos_ts[-1, i, 1], '*', color=colors[i],
+                         ms=3 + 2 * masses[i] / masses[:N_massive].max())
     ax_traj.set_aspect('equal')
-    ax_traj.legend(fontsize=5, loc='lower left')
+    ax_traj.legend(fontsize=7, loc='lower left')
     ax_traj.set_xlabel('x')
     ax_traj.set_ylabel('y')
     ax_traj.set_title('Trajectories (x-y plane)')
     ax_traj.grid(True, alpha=0.3)
 
-    # --- (0,1) x(t) ---
-    ax_x = fig.add_subplot(gs[0, 1])
+    # ===== Figure 2: x(t), y(t), residuals =====
+    fig2, (ax_x, ax_y, ax_res) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    if title:
+        fig2.suptitle(title, fontsize=14, fontweight='bold')
+    fig2.subplots_adjust(hspace=0.25, top=0.93)
+
+    # x(t)
     for i in range(N):
-        ax_x.plot(times, pos_ts[:, i, 0], color=colors[i], lw=0.8, label=labels[i])
+        if i == test_particle_idx:
+            ax_x.plot(times, pos_ts[:, i, 0], 'k', lw=1.5, label=labels[i])
+        else:
+            ax_x.plot(times, pos_ts[:, i, 0], color=colors[i], lw=0.8, label=labels[i])
     ax_x.set_ylabel('x')
-    ax_x.set_xlabel('Time')
     ax_x.set_title('x(t)')
     ax_x.legend(fontsize=5, loc='upper right')
     ax_x.grid(True, alpha=0.3)
 
-    # --- Conservation quantities ---
+    # y(t)
+    for i in range(N):
+        if i == test_particle_idx:
+            ax_y.plot(times, pos_ts[:, i, 1], 'k', lw=1.5, label=labels[i])
+        else:
+            ax_y.plot(times, pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
+    ax_y.set_ylabel('y')
+    ax_y.set_title('y(t)')
+    ax_y.legend(fontsize=5, loc='upper right')
+    ax_y.grid(True, alpha=0.3)
+
+    # Conservation residuals
     E_vals = energies
     L_vals = np.linalg.norm(angular_momenta, axis=1)
     E0, L0 = E_vals[0], L_vals[0]
     E_res, L_res = E_vals - E0, L_vals - L0
 
-    # --- (1,0) residuals ---
-    ax_res = fig.add_subplot(gs[1, 0])
     ax_res.plot(times, E_res, label='E - E0')
     ax_res.plot(times, L_res, label='|L| - |L0|')
     ax_res.set_xlabel('Time')
@@ -552,17 +544,7 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     ax_res.legend(fontsize=7)
     ax_res.grid(True, alpha=0.3)
 
-    # --- (1,1) y(t) ---
-    ax_y = fig.add_subplot(gs[1, 1])
-    for i in range(N):
-        ax_y.plot(times, pos_ts[:, i, 1], color=colors[i], lw=0.8, label=labels[i])
-    ax_y.set_ylabel('y')
-    ax_y.set_xlabel('Time')
-    ax_y.set_title('y(t)')
-    ax_y.legend(fontsize=5, loc='upper right')
-    ax_y.grid(True, alpha=0.3)
-
-def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500):
+def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500, test_particle=False):
     """
     Common driver: simulate, print conservation diagnostics, plot, and show.
 
@@ -574,13 +556,86 @@ def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500
         Number of orbital periods to simulate.
     steps_per_orbit : int
         Number of max-step intervals per orbit (controls integration resolution).
+    test_particle : bool
+        If True, add an infinitesimal-mass body at the system centre of mass
+        and track its trajectory.
     """
+    masses = np.asarray(masses, dtype=float)
+    tp_idx = None
+
     T = T_orbit * n_orbits
     t_span = (0.0, T)
     dt = T_orbit / steps_per_orbit
+
+    # Simulate the massive bodies only
     times, pos_ts, vel_ts, energies, angular_momenta = simulate_and_check_conservation(
         pos, vel, masses, t_span, dt
     )
+
+    if test_particle:
+        # Propagate a zero-mass test particle separately using the
+        # gravitational field of the massive bodies (interpolated).
+        from scipy.interpolate import interp1d
+        N = len(masses)
+        M_steps = len(times)
+
+        # Build interpolators for each massive-body position component
+        # pos_ts shape: (M_steps, N, 3)
+        pos_interp = interp1d(times, pos_ts, axis=0, kind='cubic',
+                              fill_value='extrapolate')
+
+        # Test-particle initial conditions: system CoG in the CoM frame.
+        # The simulation output is already in the CoM frame, so compute
+        # the CoG from pos_ts[0] / vel_ts[0] to stay consistent.
+        total_mass = masses.sum()
+        tp_pos0 = np.sum(pos_ts[0] * masses[:, None], axis=0) / total_mass
+        tp_vel0 = np.sum(vel_ts[0] * masses[:, None], axis=0) / total_mass
+
+        # Nudge the test particle slightly if it coincides with any body
+        # (avoids gravitational singularity at t=0).
+        for i in range(N):
+            if np.linalg.norm(tp_pos0 - pos_ts[0, i]) < 1e-10:
+                tp_pos0 = tp_pos0 + np.array([1e-6, 1e-6, 0.0])
+                break
+
+        def tp_eom(t, y):
+            """EOM for the test particle in the field of the massive bodies."""
+            r_tp = y[:3]
+            v_tp = y[3:]
+            body_pos = pos_interp(t)  # shape (N, 3)
+            acc = np.zeros(3)
+            G = 1.0
+            for i in range(N):
+                dr = r_tp - body_pos[i]
+                dist = np.linalg.norm(dr)
+                if dist > 0:
+                    acc -= G * masses[i] * dr / dist**3
+            return np.concatenate([v_tp, acc])
+
+        tp_y0 = np.concatenate([tp_pos0, tp_vel0])
+        tp_sol = solve_ivp(tp_eom, t_span, tp_y0, t_eval=times,
+                           method='DOP853', rtol=1e-12, atol=1e-14,
+                           max_step=dt)
+
+        if tp_sol.y.shape[1] != len(times):
+            print(f"  WARNING: test particle integrator returned {tp_sol.y.shape[1]}/{len(times)} steps. "
+                  f"Padding with last known position.")
+            # Pad with last known state
+            tp_full = np.zeros((6, len(times)))
+            n_ok = tp_sol.y.shape[1]
+            tp_full[:, :n_ok] = tp_sol.y
+            tp_full[:, n_ok:] = tp_sol.y[:, -1:]
+        else:
+            tp_full = tp_sol.y
+
+        # Append test particle trajectory to pos_ts / vel_ts
+        tp_pos_all = tp_full[:3].T  # (M_steps, 3)
+        tp_vel_all = tp_full[3:].T
+        pos_ts = np.concatenate([pos_ts, tp_pos_all[:, np.newaxis, :]], axis=1)
+        vel_ts = np.concatenate([vel_ts, tp_vel_all[:, np.newaxis, :]], axis=1)
+        masses = np.append(masses, 0.0)
+        tp_idx = len(masses) - 1
+
     E0 = energies[0]
     L_mags = np.linalg.norm(angular_momenta, axis=1)
     L0 = L_mags[0]
@@ -589,41 +644,54 @@ def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500
           f"rel change={(energies.max()-energies.min())/np.abs(E0):.3e}")
     print(f"  Ang Mom: min={L_mags.min():.3e}, max={L_mags.max():.3e}, "
           f"rel change={(L_mags.max()-L_mags.min())/np.abs(L0):.3e}")
-    plot_results(times, pos_ts, vel_ts, masses, energies, angular_momenta, title=name)
+    plot_results(times, pos_ts, vel_ts, masses, energies, angular_momenta,
+                 title=name, test_particle_idx=tp_idx)
     plt.show()
 
-def Euler_collinear_acceleration(n_orbits=1):
+def Euler_collinear_acceleration(n_orbits=1, pert=0.0, test_particle=False):
 
     # TEST - use the Euler collinear central configuration for equal masses to verify the implementation
     # masses sum to 1, G=1 in the equations
-    masses = [1/3, 1/3, 1/3]
+    masses = [1/3+pert, 1/3, 1/3]
+    masses = np.array(masses, dtype=float)/np.sum(masses) # normalize to sum to 1
 
     # Place three equal masses on the x-axis at -a, 0, +a (symmetric Euler collinear)
     a = 1.0
     pos_euler = np.array([[-a, 0.0, 0.0], [0.0, 0.0, 0.0], [a, 0.0, 0.0]])
-    m = masses[0]
-    omega = np.sqrt(1.25 * m / a**3)
 
-    # Velocities for rigid rotation are perpendicular (y-direction): v = omega * x
-    vel_euler = np.array([[0.0, -omega * a, 0.0], [0.0, 0.0, 0.0], [0.0, omega * a, 0.0]])
+    # Angular velocity for the Euler collinear CC with G=1:
+    # omega^2 = (1/a^3) * sum_{j!=i} m_j * |x_i - x_j|^{-2} * sign  (identical for all i by CC condition)
+    # For equal masses at -a, 0, +a:  omega^2 = m*(1/a^2 + 1/(2a)^2) = 1.25*m/a^3
+    # For unequal masses use the general formula from body 0 at -a:
+    #   omega^2 * (-a) = -G * [ m1*(x0-x1)/|x0-x1|^3 + m2*(x0-x2)/|x0-x2|^3 ]
+    # which gives omega^2 = G * ( m1/a^2 + m2/(2a)^2 ) / a  (forces on body 0)
+    G = 1.0
+    omega = np.sqrt(G * (masses[1] / a**2 + masses[2] / (2*a)**2))
+
+    # Velocities for rigid rotation about the system CoM: v_i = omega × (r_i - CoM)
+    com = np.sum(pos_euler * masses[:, None], axis=0) / masses.sum()
+    vel_euler = np.zeros_like(pos_euler)
+    for i in range(len(masses)):
+        r_vec = pos_euler[i] - com
+        vel_euler[i] = np.array([-omega * r_vec[1], omega * r_vec[0], 0.0])
 
     # Integration settings
     T_orbit = 2 * np.pi / omega
-    run_problem('Euler collinear', pos_euler, vel_euler, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=500)
+    run_problem('Euler collinear', pos_euler, vel_euler, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=1000, test_particle=test_particle)
 
 
-def problem_1b(n_orbits=9):
+def LagrangeCC(m, n_orbits=9, pert=0.001, steps_per_orbit=500, test_particle=False):
     """ 
     Normalized Lagrange equilateral triangle configuration for three bodies. 
     """
-    masses = np.array([1/2, 1/3, 1/6], dtype=float)
+    masses = np.array(m, dtype=float)/sum(m)    # normalize masses to sum to 1, G=1 in the equations
 
     # Place three masses at the vertices of an equilateral triangle (side a=1)
     a = 1.0
     pos_lagrange = np.array([
         [0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [0.50, np.sqrt(3) / 2, 0.0],
+        [1.0+pert, 0.0, 0.0],
+        [0.50, np.sqrt(3) / 2, 0.0]
     ], dtype=float)
     m = masses[0]
     omega = 1.0  # chosen for this normalized example
@@ -635,76 +703,8 @@ def problem_1b(n_orbits=9):
 
     # Integration settings
     T_orbit = 2 * np.pi / omega
-    run_problem('Lagrange Equilateral', pos_lagrange, vel_lagrange, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=500)
+    run_problem('Lagrange Equilateral', pos_lagrange, vel_lagrange, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=500, test_particle=test_particle)
 
-
-def problem_1c(n_orbits=1000, delta_pos_earth=None, delta_vel_earth=None):
-    """
-    Set up a normalized Sun/Earth/Moon system and run a simulation with 
-    or without perturbations to Earth's orbit.
-
-    Parameters
-    ----------
-    delta_pos_earth : ndarray, shape (3,), optional
-        Position perturbation to add to Earth.
-    delta_vel_earth : ndarray, shape (3,), optional
-        Velocity perturbation to add to Earth.
-    """
-
-    # Raw mass ratios (relative to Solar mass)
-    m_sun = 1.0
-    m_earth = 3.003489614e-6   # Earth/Sun mass ratio
-    m_moon = 3.694e-8          # Moon/Sun mass ratio (approx)
-
-    masses = np.array([m_sun, m_earth, m_moon], dtype=float)
-    masses /= masses.sum()
-
-    # Positions: place Earth at x=1 AU, Moon offset from Earth by the
-    # mean Earth-Moon distance (~384400 km = 0.00257 AU) along +y.
-    a_earth = 1.0
-
-    # provisional positions (Sun, Earth, Moon)
-    r_sun = np.array([0.0, 0.0, 0.0])
-    r_earth = np.array([a_earth, 0.0, 0.0])
-    r_moon = np.array([a_earth, 0.00257, 0.0])  # Moon ~0.00257 AU from Earth in +y
-
-    # shift positions so center of mass is at origin
-    com = (masses[0] * r_sun + masses[1] * r_earth + masses[2] * r_moon) / masses.sum()
-    pos = np.vstack([r_sun, r_earth, r_moon]) - com
-    G = 1.0
-
-    # Earth circular speed about Sun (approx, using Sun mass only)
-    r_ES = np.linalg.norm(pos[1] - pos[0])
-    omega_earth = np.sqrt(G * masses[0] / r_ES**3)
-    v_earth = omega_earth * np.array([- (pos[1] - pos[0])[1], (pos[1] - pos[0])[0], 0.0])
-
-    # Moon speed relative to Earth (circular orbit using Earth's mass)
-    r_ME = np.linalg.norm(pos[2] - pos[1])
-    omega_moon = np.sqrt(G * masses[1] / r_ME**3) if r_ME > 0 else 0.0
-    delta_ME = pos[2] - pos[1]
-    v_moon_rel = omega_moon * np.array([-delta_ME[1], delta_ME[0], 0.0])
-
-    # Inertial velocities: Earth moves with v_earth, Moon moves with v_earth + v_moon_rel
-    vel = np.zeros_like(pos)
-    vel[1] = v_earth
-    vel[2] = v_earth + v_moon_rel
-
-    # Apply perturbations to Earth (and Moon, to keep relative offset) before enforcing zero total momentum
-    if delta_pos_earth is not None:
-        dp = np.asarray(delta_pos_earth, dtype=float) * pos[1]
-        pos[1] += dp
-        pos[2] += dp  # Moon moves with Earth
-    if delta_vel_earth is not None:
-        dv = np.asarray(delta_vel_earth, dtype=float)
-        vel[1] += dv
-        vel[2] += dv  # Moon's inertial velocity shifts with Earth's
-
-    # Set Sun velocity so total linear momentum is zero
-    vel[0] = - (masses[1] * vel[1] + masses[2] * vel[2]) / masses[0]
-
-    # Integration settings
-    T_orbit = 2 * np.pi / omega_earth
-    run_problem('Sun-Earth-Moon', pos, vel, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=10)
 
 # now verify that this works for a 5 body model; use solar system as model
 def problem_2a(n_orbits=1):
@@ -765,12 +765,12 @@ def problem_2b(n_orbits=1):
 # place 5 bodies on eccentric orbit = 0.1 around the center of mass 
 # with equidistant mean anomalies and velocities for rigid rotation; simulate and check conservation
 # start simulation at periapsis for 1st body and compute initial conditions for the others accordingly
-def problem_2c(n_orbits=1):
+def problem_2c(n_orbits=1, eccentricity=0.1):
     G = 1.0
     N = 5
     masses = np.ones(N) / N
     a = 1.0  # semi-major axis
-    e = 0.1  # eccentricity
+    e = eccentricity  # eccentricity
 
     # Compute positions and velocities for each body on the eccentric orbit
     mu = G * masses.sum()
@@ -808,9 +808,207 @@ def problem_2c(n_orbits=1):
 
 
 
+def problem_2d_flyby(scenario='A', steps_per_orbit=50):
+    """
+    2-body + 3-body mutual orbit & flyby scenarios.
+
+    A binary (bodies 0,1) and a triple (bodies 2,3,4) are each set up
+    in internal circular/rigid-rotation orbits, then placed on a mutual
+    Keplerian orbit about the overall system CoM.
+
+    Parameters (per scenario)
+    -------------------------
+    D0    : semi-major axis of the mutual orbit (CoM-to-CoM separation
+            at periapsis when e_mut=0, i.e. circular)
+    b     : initial true anomaly (radians) on the mutual orbit
+    ecc   : eccentricity of the mutual orbit (0 = circular, >0 = eccentric)
+
+    Scenarios
+    ---------
+    A : Circular mutual orbit (e=0)  — stable initial hierarchy
+    B : Mildly eccentric (e=0.3)     — periodic close approaches
+    C : Moderately eccentric (e=0.5) — stronger tidal pumping
+    D : Highly eccentric (e=0.8)     — deep plunge, likely disruption
+    E : Retrograde triple, circular  — opposite spin directions
+    """
+    G = 1.0
+
+    # ---------- scenario parameters ----------
+    # D0 = mutual semi-major axis, b = initial true anomaly (rad),
+    # ecc = mutual eccentricity
+    configs = {
+        'A': dict(m=np.array([0.20, 0.20, 0.20, 0.20, 0.20]),
+                  a_bin=2.0, a_trip=1.0, D0=8.0, b=0.0, ecc=0.0,
+                  triple_type='lagrange', retrograde=False,
+                  title='Scenario A: Circular mutual orbit (e=0)'),
+        'B': dict(m=np.array([0.20, 0.20, 0.20, 0.20, 0.20]),
+                  a_bin=2.0, a_trip=1.0, D0=8.0, b=0.0, ecc=0.3,
+                  triple_type='lagrange', retrograde=False,
+                  title='Scenario B: Mildly eccentric (e=0.3)'),
+        'C': dict(m=np.array([0.20, 0.20, 0.20, 0.20, 0.20]),
+                  a_bin=2.0, a_trip=1.0, D0=8.0, b=0.0, ecc=0.5,
+                  triple_type='lagrange', retrograde=False,
+                  title='Scenario C: Moderately eccentric (e=0.5)'),
+        'D': dict(m=np.array([0.20, 0.20, 0.20, 0.20, 0.20]),
+                  a_bin=2.0, a_trip=1.0, D0=8.0, b=0.0, ecc=0.8,
+                  triple_type='lagrange', retrograde=False,
+                  title='Scenario D: Highly eccentric (e=0.8)'),
+        'E': dict(m=np.array([0.20, 0.20, 0.20, 0.20, 0.20]),
+                  a_bin=2.0, a_trip=1.0, D0=8.0, b=0.0, ecc=0.0,
+                  triple_type='lagrange', retrograde=True,
+                  title='Scenario E: Retrograde triple, circular'),
+    }
+    cfg = configs[scenario]
+    m     = cfg['m']
+    a_bin = cfg['a_bin']
+    a_trip = cfg['a_trip']
+    D0    = cfg['D0']
+    b     = cfg['b']
+    ecc   = cfg['ecc']
+
+    m1, m2 = m[0], m[1]
+    m3, m4, m5 = m[2], m[3], m[4]
+    M_bin  = m1 + m2
+    M_trip = m3 + m4 + m5
+    M_tot  = M_bin + M_trip
+
+    # ========== BINARY (bodies 0,1) centered at origin ==========
+    # Circular orbit: relative separation a_bin, relative speed v_rel
+    v_rel_bin = np.sqrt(G * M_bin / a_bin)
+    pos_bin = np.array([
+        [-m2 / M_bin * a_bin, 0.0, 0.0],
+        [ m1 / M_bin * a_bin, 0.0, 0.0],
+    ])
+    vel_bin = np.array([
+        [0.0, -m2 / M_bin * v_rel_bin, 0.0],
+        [0.0,  m1 / M_bin * v_rel_bin, 0.0],
+    ])
+    T_bin = 2 * np.pi * a_bin**1.5 / np.sqrt(G * M_bin)
+
+    # ========== TRIPLE (bodies 2,3,4) centered at origin ==========
+    if cfg['triple_type'] == 'hierarchical':
+        # Inner binary (m3, m4) with separation a_inner, outer body (m5)
+        a_inner = 0.2
+        a_outer = a_trip
+        M_inner = m3 + m4
+
+        v_rel_inner = np.sqrt(G * M_inner / a_inner)
+        pos_trip = np.array([
+            [-m4 / M_inner * a_inner, 0.0, 0.0],
+            [ m3 / M_inner * a_inner, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ])
+        vel_trip = np.array([
+            [0.0, -m4 / M_inner * v_rel_inner, 0.0],
+            [0.0,  m3 / M_inner * v_rel_inner, 0.0],
+            [0.0, 0.0, 0.0],
+        ])
+
+        # Outer body orbits the inner-pair CoM (at origin) at distance a_outer
+        phase_out = np.pi / 3          # start outer body at 60 deg
+        v_out_mag = np.sqrt(G * M_trip / a_outer)
+        r_out = a_outer * np.array([np.cos(phase_out), np.sin(phase_out), 0.0])
+        v_out = v_out_mag * np.array([-np.sin(phase_out), np.cos(phase_out), 0.0])
+
+        # Shift inner pair so that the whole-triple CoM is at origin
+        shift_pos = -m5 / M_trip * r_out
+        shift_vel = -m5 / M_trip * v_out
+        pos_trip[0] += shift_pos;  vel_trip[0] += shift_vel
+        pos_trip[1] += shift_pos;  vel_trip[1] += shift_vel
+        pos_trip[2] = M_inner / M_trip * r_out
+        vel_trip[2] = M_inner / M_trip * v_out
+
+        T_trip = 2 * np.pi * a_outer**1.5 / np.sqrt(G * M_trip)
+    else:
+        # Lagrange equilateral triangle, side = a_trip
+        masses_trip = np.array([m3, m4, m5])
+        verts = np.array([
+            [0.0, 0.0, 0.0],
+            [a_trip, 0.0, 0.0],
+            [a_trip / 2, a_trip * np.sqrt(3) / 2, 0.0],
+        ])
+        com_trip = np.sum(verts * masses_trip[:, None], axis=0) / M_trip
+        verts -= com_trip
+
+        omega_trip = np.sqrt(G * M_trip / a_trip**3)
+        if cfg['retrograde']:
+            omega_trip = -omega_trip
+
+        vel_trip = np.zeros_like(verts)
+        for i in range(3):
+            vel_trip[i] = np.array([-omega_trip * verts[i, 1],
+                                     omega_trip * verts[i, 0], 0.0])
+        pos_trip = verts
+        T_trip = 2 * np.pi / abs(omega_trip)
+
+    # ========== MUTUAL ORBIT ==========
+    # Place binary CoM and triple CoM on a circular orbit about the
+    # overall system CoM, at separation D0.  The parameter b is the
+    # initial true anomaly (radians) on that mutual orbit; ecc is
+    # the eccentricity of the mutual orbit.
+    e_mut = ecc             # mutual orbit eccentricity
+    theta0 = b             # reinterpret: initial true anomaly (rad)
+    mu_mut = G * M_tot     # gravitational parameter for mutual orbit
+
+    # Semi-latus rectum and radial distance at theta0
+    p_mut = D0 * (1 - e_mut**2) if e_mut < 1.0 else D0 * (e_mut**2 - 1)
+    r_mut = p_mut / (1 + e_mut * np.cos(theta0))
+
+    # Mutual orbit velocity components (perifocal frame)
+    h_mut = np.sqrt(mu_mut * p_mut)
+    vr_mut = mu_mut / h_mut * e_mut * np.sin(theta0)
+    vt_mut = mu_mut / h_mut * (1 + e_mut * np.cos(theta0))
+
+    # Position and velocity of triple CoM relative to binary CoM
+    R_sep = r_mut * np.array([np.cos(theta0), np.sin(theta0), 0.0])
+    rhat = np.array([np.cos(theta0), np.sin(theta0), 0.0])
+    that = np.array([-np.sin(theta0), np.cos(theta0), 0.0])
+    V_sep = vr_mut * rhat + vt_mut * that
+
+    # Distribute to each subsystem CoM (CoM frame)
+    r_bin_com  = -M_trip / M_tot * R_sep
+    r_trip_com =  M_bin  / M_tot * R_sep
+    v_bin_com  = -M_trip / M_tot * V_sep
+    v_trip_com =  M_bin  / M_tot * V_sep
+
+    pos_bin  += r_bin_com;   vel_bin  += v_bin_com
+    pos_trip += r_trip_com;  vel_trip += v_trip_com
+
+    pos = np.vstack([pos_bin, pos_trip])
+    vel = np.vstack([vel_bin, vel_trip])
+
+    # ========== INTEGRATION ==========
+    T_mut = 2 * np.pi * (D0 if e_mut < 1 else p_mut)**1.5 / np.sqrt(mu_mut)
+    T_ref = min(T_bin, T_trip)
+    T_total = T_mut  / 2     # simulate ~2 mutual orbits
+    n_orbits = T_total / T_ref
+
+    print(f"\n{'='*60}")
+    print(f"{cfg['title']}")
+    print(f"  masses       = {m}")
+    print(f"  T_binary     = {T_bin:.3f},  T_triple = {T_trip:.3f}")
+    print(f"  D0={D0}, e_mut={e_mut}, theta0={theta0:.2f} rad")
+    print(f"  T_mutual     = {T_mut:.3f}")
+    print(f"  T_total      = {T_total:.1f}  ({n_orbits:.1f} ref orbits)")
+    print(f"{'='*60}")
+
+    run_problem(cfg['title'], pos, vel, m, T_ref,
+                n_orbits=n_orbits, steps_per_orbit=steps_per_orbit)
+
+
 if __name__ == '__main__':
-    Euler_collinear_acceleration()
-    # Perturb Earth's position by 0.1 AU in y
-    # problem_1c(delta_pos_earth=[0.20, 0.00, 0.0])
-    # problem_2c()
-    problem_2c()
+    Euler_collinear_acceleration(pert=1/6, n_orbits=2)
+
+   # LagrangeCC([1/2, 1/3, 1/6], n_orbits=2, test_particle=False)
+    # Routhy Stability
+    #     m_sun = 1.0,  m_earth = 3.003489614e-6, m_moon = 3.694e-8
+    m1 = 1.0
+    m2 = 0.03   # Earth/Sun mass ratio
+    m3 = 3.0e-4          # Moon/Sun mass ratio (approx)
+    routhy = m1*m2 + m1*m3 + m2*m3
+    print(f"Routh's criterion for stability of the Lagrange points: m1*m2 + m1*m3 + m2*m3 = {routhy:.3e} < 0.03852 => L4/L5 are stable")
+  #  LagrangeCC([m1,m2,m3], pert=0.0, n_orbits=1, steps_per_orbit=1000, test_particle=True)
+ #   problem_2a(n_orbits=2)
+#    problem_2b(n_orbits=0.1)
+#    problem_2c(n_orbits=4, eccentricity=0.3)
+  #  problem_2d_flyby(scenario='E', steps_per_orbit=1000)
