@@ -61,7 +61,7 @@ def reduced_masses(masses):
     """
     masses = np.array(masses, dtype=float)
     N = len(masses)
-    # M[i] = sum of masses[0..i] (i.e., M_1, M_2, ..., M_N in Scheeres' notation)
+    # M[i] = sum of masses[0..i] 
     M = np.cumsum(masses)
     eta = np.zeros(N - 1)
     for i in range(N - 1):
@@ -334,8 +334,8 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
         args=(masses,),
         t_eval=t_eval,
         method='DOP853',
-        rtol=1e-14,
-        atol=1e-16,
+        rtol=1e-12,
+        atol=1e-14,
     )
 
     times = sol.t
@@ -544,6 +544,35 @@ def plot_results(times, pos_ts, vel_ts, masses, energies=None, angular_momenta=N
     ax_res.legend(fontsize=7)
     ax_res.grid(True, alpha=0.3)
 
+    # ===== Figure 3: Test particle only =====
+    if test_particle_idx is not None:
+        tp = test_particle_idx
+        fig3, (ax_tp_traj, ax_tp_t) = plt.subplots(1, 2, figsize=(14, 6))
+        if title:
+            fig3.suptitle(f'{title} — Test Particle', fontsize=14, fontweight='bold')
+
+        # x-y trajectory
+        ax_tp_traj.plot(pos_ts[:, tp, 0], pos_ts[:, tp, 1], 'k-', lw=1.2)
+        ax_tp_traj.plot(pos_ts[0, tp, 0], pos_ts[0, tp, 1], 'kD', ms=8, label='start')
+        ax_tp_traj.plot(pos_ts[-1, tp, 0], pos_ts[-1, tp, 1], 'k*', ms=10, label='end')
+        ax_tp_traj.set_aspect('equal')
+        ax_tp_traj.set_xlabel('x')
+        ax_tp_traj.set_ylabel('y')
+        ax_tp_traj.set_title('Test Particle Trajectory (x-y)')
+        ax_tp_traj.legend(fontsize=8)
+        ax_tp_traj.grid(True, alpha=0.3)
+
+        # x(t) and y(t)
+        ax_tp_t.plot(times, pos_ts[:, tp, 0], label='x(t)')
+        ax_tp_t.plot(times, pos_ts[:, tp, 1], label='y(t)')
+        ax_tp_t.set_xlabel('Time')
+        ax_tp_t.set_ylabel('Position')
+        ax_tp_t.set_title('Test Particle x(t), y(t)')
+        ax_tp_t.legend(fontsize=8)
+        ax_tp_t.grid(True, alpha=0.3)
+
+        fig3.tight_layout()
+
 def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500, test_particle=False):
     """
     Common driver: simulate, print conservation diagnostics, plot, and show.
@@ -563,78 +592,39 @@ def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500
     masses = np.asarray(masses, dtype=float)
     tp_idx = None
 
+    if test_particle:
+        N = len(masses)
+        # Test-particle initial conditions: system CoM position & velocity
+        total_mass = masses.sum()
+        tp_pos0 = np.sum(pos * masses[:, None], axis=0) / total_mass
+        tp_vel0 = np.sum(vel * masses[:, None], axis=0) / total_mass
+
+        # Nudge slightly if it coincides with any body (avoid singularity)
+        for i in range(N):
+            if np.linalg.norm(tp_pos0 - pos[i]) < 1e-10:
+                tp_pos0 = tp_pos0 + np.array([1e-6, 1e-6, 0.0])
+                break
+
+        # Append test particle as (N+1)th body with infinitesimal mass.
+        # Use 1e-10 rather than a smaller epsilon: the Jacobi EOM divides
+        # the force by the reduced mass eta ~ epsilon, so too-small values
+        # amplify floating-point roundoff and stall the integrator.
+        pos = np.vstack([pos, tp_pos0[np.newaxis, :]])
+        vel = np.vstack([vel, tp_vel0[np.newaxis, :]])
+        masses = np.append(masses, 1e-10)
+        tp_idx = len(masses) - 1
+
     T = T_orbit * n_orbits
     t_span = (0.0, T)
     dt = T_orbit / steps_per_orbit
 
-    # Simulate the massive bodies only
     times, pos_ts, vel_ts, energies, angular_momenta = simulate_and_check_conservation(
         pos, vel, masses, t_span, dt
     )
 
-    if test_particle:
-        # Propagate a zero-mass test particle separately using the
-        # gravitational field of the massive bodies (interpolated).
-        from scipy.interpolate import interp1d
-        N = len(masses)
-        M_steps = len(times)
-
-        # Build interpolators for each massive-body position component
-        # pos_ts shape: (M_steps, N, 3)
-        pos_interp = interp1d(times, pos_ts, axis=0, kind='cubic',
-                              fill_value='extrapolate')
-
-        # Test-particle initial conditions: system CoG in the CoM frame.
-        # The simulation output is already in the CoM frame, so compute
-        # the CoG from pos_ts[0] / vel_ts[0] to stay consistent.
-        total_mass = masses.sum()
-        tp_pos0 = np.sum(pos_ts[0] * masses[:, None], axis=0) / total_mass
-        tp_vel0 = np.sum(vel_ts[0] * masses[:, None], axis=0) / total_mass
-
-        # Nudge the test particle slightly if it coincides with any body
-        # (avoids gravitational singularity at t=0).
-        for i in range(N):
-            if np.linalg.norm(tp_pos0 - pos_ts[0, i]) < 1e-10:
-                tp_pos0 = tp_pos0 + np.array([1e-6, 1e-6, 0.0])
-                break
-
-        def tp_eom(t, y):
-            """EOM for the test particle in the field of the massive bodies."""
-            r_tp = y[:3]
-            v_tp = y[3:]
-            body_pos = pos_interp(t)  # shape (N, 3)
-            acc = np.zeros(3)
-            G = 1.0
-            for i in range(N):
-                dr = r_tp - body_pos[i]
-                dist = np.linalg.norm(dr)
-                if dist > 0:
-                    acc -= G * masses[i] * dr / dist**3
-            return np.concatenate([v_tp, acc])
-
-        tp_y0 = np.concatenate([tp_pos0, tp_vel0])
-        tp_sol = solve_ivp(tp_eom, t_span, tp_y0, t_eval=times,
-                           method='DOP853', rtol=1e-12, atol=1e-14,
-                           max_step=dt)
-
-        if tp_sol.y.shape[1] != len(times):
-            print(f"  WARNING: test particle integrator returned {tp_sol.y.shape[1]}/{len(times)} steps. "
-                  f"Padding with last known position.")
-            # Pad with last known state
-            tp_full = np.zeros((6, len(times)))
-            n_ok = tp_sol.y.shape[1]
-            tp_full[:, :n_ok] = tp_sol.y
-            tp_full[:, n_ok:] = tp_sol.y[:, -1:]
-        else:
-            tp_full = tp_sol.y
-
-        # Append test particle trajectory to pos_ts / vel_ts
-        tp_pos_all = tp_full[:3].T  # (M_steps, 3)
-        tp_vel_all = tp_full[3:].T
-        pos_ts = np.concatenate([pos_ts, tp_pos_all[:, np.newaxis, :]], axis=1)
-        vel_ts = np.concatenate([vel_ts, tp_vel_all[:, np.newaxis, :]], axis=1)
-        masses = np.append(masses, 0.0)
-        tp_idx = len(masses) - 1
+    # For display, show test particle mass as 0
+    if tp_idx is not None:
+        masses[tp_idx] = 0.0
 
     E0 = energies[0]
     L_mags = np.linalg.norm(angular_momenta, axis=1)
@@ -648,14 +638,13 @@ def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500
                  title=name, test_particle_idx=tp_idx)
     plt.show()
 
-def Euler_collinear_acceleration(n_orbits=1, pert=0.0, test_particle=False):
+def Euler_collinear_acceleration(m=[1/3, 1/3, 1/3], n_orbits=1, pert=0.0, test_particle=False):
 
     # TEST - use the Euler collinear central configuration for equal masses to verify the implementation
     # masses sum to 1, G=1 in the equations
-    masses = [1/3+pert, 1/3, 1/3]
-    masses = np.array(masses, dtype=float)/np.sum(masses) # normalize to sum to 1
-
-    # Place three equal masses on the x-axis at -a, 0, +a (symmetric Euler collinear)
+    masses = np.array(m, dtype=float)/sum(m) # normalize to sum to 1
+    masses[0] += pert
+    # Place masses on the x-axis at -a, 0, +a (symmetric Euler collinear)
     a = 1.0
     pos_euler = np.array([[-a, 0.0, 0.0], [0.0, 0.0, 0.0], [a, 0.0, 0.0]])
 
@@ -679,7 +668,6 @@ def Euler_collinear_acceleration(n_orbits=1, pert=0.0, test_particle=False):
     T_orbit = 2 * np.pi / omega
     run_problem('Euler collinear', pos_euler, vel_euler, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=1000, test_particle=test_particle)
 
-
 def LagrangeCC(m, n_orbits=9, pert=0.001, steps_per_orbit=500, test_particle=False):
     """ 
     Normalized Lagrange equilateral triangle configuration for three bodies. 
@@ -689,8 +677,8 @@ def LagrangeCC(m, n_orbits=9, pert=0.001, steps_per_orbit=500, test_particle=Fal
     # Place three masses at the vertices of an equilateral triangle (side a=1)
     a = 1.0
     pos_lagrange = np.array([
-        [0.0, 0.0, 0.0],
-        [1.0+pert, 0.0, 0.0],
+        [0.0+pert, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
         [0.50, np.sqrt(3) / 2, 0.0]
     ], dtype=float)
     m = masses[0]
@@ -704,7 +692,6 @@ def LagrangeCC(m, n_orbits=9, pert=0.001, steps_per_orbit=500, test_particle=Fal
     # Integration settings
     T_orbit = 2 * np.pi / omega
     run_problem('Lagrange Equilateral', pos_lagrange, vel_lagrange, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=500, test_particle=test_particle)
-
 
 # now verify that this works for a 5 body model; use solar system as model
 def problem_2a(n_orbits=1):
@@ -805,8 +792,6 @@ def problem_2c(n_orbits=1, eccentricity=0.1):
     T_orbit = 2 * np.pi * a**1.5 / np.sqrt(mu)
 
     run_problem('Eccentric configuration', pos_eccentric, vel_eccentric, masses, T_orbit, n_orbits=n_orbits, steps_per_orbit=10000)
-
-
 
 def problem_2d_flyby(scenario='A', steps_per_orbit=50):
     """
@@ -997,9 +982,9 @@ def problem_2d_flyby(scenario='A', steps_per_orbit=50):
 
 
 if __name__ == '__main__':
-    Euler_collinear_acceleration(pert=1/6, n_orbits=2)
+  #  Euler_collinear_acceleration(m=[5/8, 1/4, 1/8], n_orbits=0.25, test_particle=True)
 
-   # LagrangeCC([1/2, 1/3, 1/6], n_orbits=2, test_particle=False)
+    # LagrangeCC([1/2, 1/3, 1/6], n_orbits=3, test_particle=True, pert=0.001)
     # Routhy Stability
     #     m_sun = 1.0,  m_earth = 3.003489614e-6, m_moon = 3.694e-8
     m1 = 1.0
@@ -1007,7 +992,7 @@ if __name__ == '__main__':
     m3 = 3.0e-4          # Moon/Sun mass ratio (approx)
     routhy = m1*m2 + m1*m3 + m2*m3
     print(f"Routh's criterion for stability of the Lagrange points: m1*m2 + m1*m3 + m2*m3 = {routhy:.3e} < 0.03852 => L4/L5 are stable")
-  #  LagrangeCC([m1,m2,m3], pert=0.0, n_orbits=1, steps_per_orbit=1000, test_particle=True)
+    LagrangeCC([m1,m2,m3], pert=0.005, n_orbits=1, steps_per_orbit=500, test_particle=True)
  #   problem_2a(n_orbits=2)
 #    problem_2b(n_orbits=0.1)
 #    problem_2c(n_orbits=4, eccentricity=0.3)
