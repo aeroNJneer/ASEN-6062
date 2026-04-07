@@ -38,7 +38,6 @@ def jacobi_coordinates(positions, masses):
         jacobi_pos[i] = positions[i] - com_prev
     return jacobi_pos
 
-
 def reduced_masses(masses):
     """
     Compute the Jacobi reduced masses eta_i = M_i * m_{i+1} / M_{i+1}.
@@ -69,7 +68,6 @@ def reduced_masses(masses):
         # Here i is 0-indexed Jacobi index (R_1 corresponds to i=0 in eta)
         eta[i] = M[i] * masses[i + 1] / M[i + 1]
     return eta
-
 
 def jacobi_linear_transform(masses):
     """
@@ -334,8 +332,8 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
         args=(masses,),
         t_eval=t_eval,
         method='DOP853',
-        rtol=1e-12,
-        atol=1e-14,
+        rtol=1e-9,
+        atol=1e-11,
     )
 
     times = sol.t
@@ -370,11 +368,257 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
 
     return times, positions, velocities
 
+def compute_jacobi_constant(positions, velocities, masses, omega):
+    """
+    Compute the Jacobi constant C_J in the rotating frame.
 
-# Conserved quantities in the N-body problem include:
-# 1. Total energy (kinetic + potential)
-# 2. Total linear momentum
-# 3. Total angular momentum
+    C_J = -2E_rot = -(v_rot^2) + 2U_eff
+        = -|v - omega x r|^2 + 2*U(r) + (omega x r).(omega x r)
+        = -|v|^2 + 2*omega*L_z + 2*U(r)
+
+    where L_z is the z-component of angular momentum and U is the
+    gravitational potential.
+
+    Parameters
+    ----------
+    positions : ndarray, shape (N, 3)
+        Cartesian positions in the inertial (COM) frame.
+    velocities : ndarray, shape (N, 3)
+        Cartesian velocities in the inertial frame.
+    masses : ndarray, shape (N,)
+        Masses of the N bodies.
+    omega : float
+        Angular velocity of the rotating frame.
+
+    Returns
+    -------
+    C_J : float
+        The Jacobi constant.
+    """
+    G = 1.0
+    masses = np.array(masses, dtype=float)
+    N = len(masses)
+
+    # Kinetic energy
+    kinetic = 0.5 * np.sum(masses[:, None] * velocities**2)
+
+    # Gravitational potential energy
+    potential = 0.0
+    for i in range(N):
+        for j in range(i + 1, N):
+            r_mag = np.linalg.norm(positions[j] - positions[i])
+            potential -= G * masses[i] * masses[j] / r_mag
+
+    # z-component of total angular momentum
+    L_z = 0.0
+    for i in range(N):
+        L_z += masses[i] * (positions[i, 0] * velocities[i, 1] - positions[i, 1] * velocities[i, 0])
+
+    # C_J = -2E + 2*omega*L_z = -2*(kinetic + potential) + 2*omega*L_z
+    C_J = -2.0 * (kinetic + potential) + 2.0 * omega * L_z
+    return C_J
+
+def compute_collinear_CJ(masses, omega):
+    """
+    Compute the Jacobi constant at the three collinear Lagrange points (L1, L2, L3)
+    for a three-body system in the rotating frame.
+
+    At a Lagrange point the velocity in the rotating frame is zero, so
+    C_J = 2*U_eff = omega^2*(x^2 + y^2) + 2*G*sum(m_i / |r - r_i|)
+
+    The collinear points lie along the line connecting the bodies. This
+    function finds them numerically by solving the equilibrium condition
+    dU_eff/dx = 0 along the x-axis in the rotating frame.
+
+    Parameters
+    ----------
+    masses : ndarray, shape (3,)
+        Masses of the three bodies (normalized, sum to 1).
+    omega : float
+        Angular velocity of the rotating frame.
+
+    Returns
+    -------
+    CJ_L : dict
+        {'L1': C_J_L1, 'L2': C_J_L2, 'L3': C_J_L3} — Jacobi constants
+        at the three collinear points, ordered L1 < L2 < L3 by convention
+        (L1 between bodies, L2 outside smaller, L3 outside larger).
+    L_positions : dict
+        {'L1': (x,y), 'L2': (x,y), 'L3': (x,y)} — positions of the
+        collinear points in the rotating frame.
+    """
+    from scipy.optimize import brentq
+    G = 1.0
+    masses = np.array(masses, dtype=float)
+
+    # Positions of the three bodies in the rotating frame (equilateral triangle
+    # with side a=1, rotating at omega). Compute COM and center.
+    a = 1.0
+    pos_rot = np.array([
+        [0.0, 0.0, 0.0],
+        [a,   0.0, 0.0],
+        [a/2, a*np.sqrt(3)/2, 0.0]
+    ], dtype=float)
+    com = np.sum(pos_rot * masses[:, None], axis=0) / masses.sum()
+    pos_rot -= com  # center on COM
+
+    def U_eff(x, y):
+        """Effective potential at (x, y) in the rotating frame."""
+        r_sq = x**2 + y**2
+        centrifugal = 0.5 * omega**2 * r_sq
+        grav = 0.0
+        for i in range(len(masses)):
+            dx = x - pos_rot[i, 0]
+            dy = y - pos_rot[i, 1]
+            r = np.sqrt(dx**2 + dy**2)
+            if r > 1e-14:
+                grav += G * masses[i] / r
+        return centrifugal + grav
+
+    def dUeff_dx(x, y=0.0):
+        """Partial derivative of U_eff w.r.t. x along y=const."""
+        val = omega**2 * x
+        for i in range(len(masses)):
+            dx = x - pos_rot[i, 0]
+            dy = y - pos_rot[i, 1]
+            r = np.sqrt(dx**2 + dy**2)
+            if r > 1e-14:
+                val -= G * masses[i] * dx / r**3
+        return val
+
+    # Find collinear points along each line connecting pairs of bodies,
+    # and beyond the outer bodies. Search on lines through each pair.
+    # For the general 3-body equilateral case, we search along the line
+    # from COM through each body (the collinear points lie roughly along
+    # these directions).
+
+    lagrange_points = {}
+
+    # For each body, search for a saddle point along the line from COM
+    # through that body (and beyond).
+    for idx in range(3):
+        # Direction from COM to body idx
+        dx_dir = pos_rot[idx, 0]
+        dy_dir = pos_rot[idx, 1]
+        length = np.sqrt(dx_dir**2 + dy_dir**2)
+        if length < 1e-14:
+            continue
+        ux, uy = dx_dir / length, dy_dir / length
+
+        # Parametric: (x, y) = s * (ux, uy)
+        def dUeff_ds(s, _ux=ux, _uy=uy):
+            x, y = s * _ux, s * _uy
+            # Project gradient onto direction
+            grad_x = omega**2 * x
+            grad_y = omega**2 * y
+            for i in range(len(masses)):
+                ddx = x - pos_rot[i, 0]
+                ddy = y - pos_rot[i, 1]
+                r = np.sqrt(ddx**2 + ddy**2)
+                if r > 1e-14:
+                    grad_x -= G * masses[i] * ddx / r**3
+                    grad_y -= G * masses[i] * ddy / r**3
+            return grad_x * _ux + grad_y * _uy
+
+        # Body position in parameter s
+        s_body = length
+
+        # Search intervals: between COM region and body, and beyond body
+        search_intervals = [
+            (0.01, s_body - 0.01),
+            (s_body + 0.01, s_body * 3.0),
+        ]
+
+        label_count = 0
+        for s_lo, s_hi in search_intervals:
+            try:
+                n_pts = 200
+                ss = np.linspace(s_lo, s_hi, n_pts)
+                vals = [dUeff_ds(s) for s in ss]
+                for k in range(len(vals) - 1):
+                    if vals[k] * vals[k+1] < 0:
+                        s_root = brentq(dUeff_ds, ss[k], ss[k+1])
+                        x_eq, y_eq = s_root * ux, s_root * uy
+                        cj = 2.0 * U_eff(x_eq, y_eq)
+                        key = f"L_body{idx}_{label_count}"
+                        lagrange_points[key] = {
+                            'pos': (x_eq, y_eq),
+                            'CJ': cj,
+                            's': s_root
+                        }
+                        label_count += 1
+            except ValueError:
+                pass
+
+    # Sort all found points by CJ value (descending — highest CJ is most restrictive)
+    sorted_pts = sorted(lagrange_points.items(), key=lambda kv: kv[1]['CJ'], reverse=True)
+
+    # Relabel as L1, L2, L3 (highest CJ = most restrictive gateway)
+    CJ_L = {}
+    L_positions = {}
+    for i, (key, data) in enumerate(sorted_pts[:3]):
+        label = f'L{i+1}'
+        CJ_L[label] = data['CJ']
+        L_positions[label] = data['pos']
+
+    return CJ_L, L_positions
+
+def check_zero_velocity_crossing(times, pos_ts, vel_ts, masses, omega):
+    """
+    Check whether the system's Jacobi constant crosses below the collinear
+    Lagrange point values during a simulation, indicating the zero-velocity
+    curves have opened and escape is possible.
+
+    Parameters
+    ----------
+    times : ndarray, shape (M,)
+        Time array.
+    pos_ts : ndarray, shape (M, N, 3)
+        Position time series.
+    vel_ts : ndarray, shape (M, N, 3)
+        Velocity time series.
+    masses : ndarray, shape (N,)
+        Masses of the bodies.
+    omega : float
+        Angular velocity of the rotating frame.
+
+    Returns
+    -------
+    result : dict
+        'CJ_timeseries': array of C_J at each timestep
+        'CJ_L': dict of collinear Lagrange point C_J values
+        'L_positions': dict of Lagrange point positions
+        'crossings': dict mapping 'L1','L2','L3' to the first time index
+                     where C_J drops below that point's value (None if never)
+    """
+    M = len(times)
+    CJ_ts = np.zeros(M)
+    for k in range(M):
+        CJ_ts[k] = compute_jacobi_constant(pos_ts[k], vel_ts[k], masses, omega)
+
+    CJ_L, L_positions = compute_collinear_CJ(masses[:3], omega)
+
+    crossings = {}
+    for label in sorted(CJ_L.keys()):
+        threshold = CJ_L[label]
+        below = np.where(CJ_ts < threshold)[0]
+        crossings[label] = int(below[0]) if len(below) > 0 else None
+
+    print(f"\n  Jacobi constant analysis:")
+    print(f"    C_J(t=0) = {CJ_ts[0]:.6f}")
+    print(f"    C_J(min) = {CJ_ts.min():.6f},  C_J(max) = {CJ_ts.max():.6f}")
+    for label in sorted(CJ_L.keys()):
+        pos_L = L_positions[label]
+        cx = crossings[label]
+        status = f"CROSSED at t={times[cx]:.4f}" if cx is not None else "not crossed"
+        print(f"    C_J({label}) = {CJ_L[label]:.6f}  at ({pos_L[0]:.4f}, {pos_L[1]:.4f})  — {status}")
+
+    return {
+        'CJ_timeseries': CJ_ts,
+        'CJ_L': CJ_L,
+        'L_positions': L_positions,
+        'crossings': crossings,
+    }
 
 def compute_energy(positions, velocities, masses):
     """
@@ -611,7 +855,7 @@ def run_problem(name, pos, vel, masses, T_orbit, n_orbits=1, steps_per_orbit=500
         # amplify floating-point roundoff and stall the integrator.
         pos = np.vstack([pos, tp_pos0[np.newaxis, :]])
         vel = np.vstack([vel, tp_vel0[np.newaxis, :]])
-        masses = np.append(masses, 1e-10)
+        masses = np.append(masses, 1e-8)
         tp_idx = len(masses) - 1
 
     T = T_orbit * n_orbits
@@ -677,12 +921,12 @@ def LagrangeCC(m, n_orbits=9, pert=0.001, steps_per_orbit=500, test_particle=Fal
     # Place three masses at the vertices of an equilateral triangle (side a=1)
     a = 1.0
     pos_lagrange = np.array([
-        [0.0+pert, 0.0, 0.0],
+        [0.0+pert, 0.0+pert, 0.0],
         [1.0, 0.0, 0.0],
         [0.50, np.sqrt(3) / 2, 0.0]
     ], dtype=float)
     m = masses[0]
-    omega = 1.0  # chosen for this normalized example
+    omega = 1.0  # w=sqrt(G * M / l^3) = 1 
     com = np.sum(pos_lagrange * masses[:, None], axis=0) / np.sum(masses)
     vel_lagrange = np.zeros_like(pos_lagrange)
     for i in range(len(masses)):
@@ -982,17 +1226,46 @@ def problem_2d_flyby(scenario='A', steps_per_orbit=50):
 
 
 if __name__ == '__main__':
-  #  Euler_collinear_acceleration(m=[5/8, 1/4, 1/8], n_orbits=0.25, test_particle=True)
+  #  Euler_collinear_acceleration(m=[1/2, 1/3, 1/6], n_orbits=0.5, test_particle=True)
 
-    # LagrangeCC([1/2, 1/3, 1/6], n_orbits=3, test_particle=True, pert=0.001)
+    # LagrangeCC([1/2, 1/3, 1/6], n_orbits=3, test_particle=False, pert=0.001)
     # Routhy Stability
     #     m_sun = 1.0,  m_earth = 3.003489614e-6, m_moon = 3.694e-8
     m1 = 1.0
     m2 = 0.03   # Earth/Sun mass ratio
-    m3 = 3.0e-4          # Moon/Sun mass ratio (approx)
+    m3 = 3.0e-3         # Moon/Sun mass ratio (approx)
     routhy = m1*m2 + m1*m3 + m2*m3
-    print(f"Routh's criterion for stability of the Lagrange points: m1*m2 + m1*m3 + m2*m3 = {routhy:.3e} < 0.03852 => L4/L5 are stable")
-    LagrangeCC([m1,m2,m3], pert=0.005, n_orbits=1, steps_per_orbit=500, test_particle=True)
+    print(f"Routh's criterion for stability of the Lagrange points: m1*m2 + m1*m3 + m2*m3 = {routhy:.3e} < 1/27 ≈ 0.03704 => L4/L5 are stable")
+
+    # Check perturbation threshold before simulating
+    masses_norm = np.array([m1, m2, m3]) / (m1 + m2 + m3)
+    omega = 1.0
+    CJ_L, L_pos = compute_collinear_CJ(masses_norm, omega)
+    print(f"\nCollinear Lagrange point C_J values:")
+    for label in sorted(CJ_L.keys()):
+        print(f"  C_J({label}) = {CJ_L[label]:.6f}  at ({L_pos[label][0]:.4f}, {L_pos[label][1]:.4f})")
+
+    # Sweep perturbations to find the critical value
+    print(f"\nPerturbation sweep (displacing body 0 in x):")
+    a = 1.0
+    for pert in [0.001, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]:
+        pos_test = np.array([
+            [0.0+pert, 0.0+pert, 0.0],
+            [a, 0.0, 0.0],
+            [a/2, a*np.sqrt(3)/2, 0.0]
+        ])
+        com = np.sum(pos_test * masses_norm[:, None], axis=0) / masses_norm.sum()
+        pos_test -= com
+        vel_test = np.zeros_like(pos_test)
+        for i in range(3):
+            r_vec = pos_test[i]
+            vel_test[i] = np.array([-omega * r_vec[1], omega * r_vec[0], 0.0])
+        cj = compute_jacobi_constant(pos_test, vel_test, masses_norm, omega)
+        below = [l for l in sorted(CJ_L.keys()) if cj < CJ_L[l]]
+        status = f"BELOW {', '.join(below)} → UNSTABLE" if below else "above all → stable"
+        print(f"  pert={pert:.3f}:  C_J = {cj:.6f}  {status}")
+
+    LagrangeCC([m1,m2,m3], pert=0.0, n_orbits=10, steps_per_orbit=100, test_particle=True)
  #   problem_2a(n_orbits=2)
 #    problem_2b(n_orbits=0.1)
 #    problem_2c(n_orbits=4, eccentricity=0.3)
