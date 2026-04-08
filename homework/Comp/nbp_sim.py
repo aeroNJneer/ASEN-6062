@@ -162,7 +162,10 @@ def _potential_gradient_jacobi(jac_pos_rel, masses):
             r_mag = np.linalg.norm(r_vec)
             if r_mag == 0:
                 continue
-            F_ab = G * masses[a] * masses[b] * r_vec / r_mag**3
+            # Softened gravity: prevent divergence during close encounters
+            eps = 1e-6
+            r_soft = np.sqrt(r_mag**2 + eps**2)
+            F_ab = G * masses[a] * masses[b] * r_vec / r_soft**3
 
             # -dU/dR_l = -sum F_ab * c_l  (note the overall minus sign)
 
@@ -324,16 +327,17 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
     num_steps = max(2, int(np.floor((t1 - t0) / dt)) + 1)
     t_eval = np.linspace(t0, t1, num_steps)
 
-    # Integrate equations of motion with tighter tolerances and high-order method
+    # Integrate equations of motion with stiff-capable solver and max_step control
     sol = solve_ivp(
         equations_of_motion,
         t_span,
         y0,
         args=(masses,),
         t_eval=t_eval,
-        method='DOP853',
-        rtol=1e-9,
-        atol=1e-11,
+        method='Radau',
+        rtol=1e-10,
+        atol=1e-12,
+        max_step=dt,
     )
 
     times = sol.t
@@ -1265,7 +1269,7 @@ if __name__ == '__main__':
         status = f"BELOW {', '.join(below)} → UNSTABLE" if below else "above all → stable"
         print(f"  pert={pert:.3f}:  C_J = {cj:.6f}  {status}")
 
-    LagrangeCC([m1,m2,m3], pert=0.0, n_orbits=10, steps_per_orbit=100, test_particle=True)
+    LagrangeCC([m1,m2,m3], pert=0.05, n_orbits=100, steps_per_orbit=20, test_particle=True)
  #   problem_2a(n_orbits=2)
 #    problem_2b(n_orbits=0.1)
 #    problem_2c(n_orbits=4, eccentricity=0.3)

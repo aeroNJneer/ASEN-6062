@@ -111,7 +111,7 @@ def calculate_residuals(positions, velocities, masses):
 
 masses = np.array([1.0, 0.03, 0.003, 10e-12], dtype=float)
 pos = np.array([
-        [0.0, 0.0, 0.0],
+        [0.0+0.05, 0.0+0.05, 0.0],
         [1, 0.0, 0.0],
         [0.5, np.sqrt(3) / 2, 0.0]
     ], dtype=float)
@@ -132,7 +132,7 @@ print(transformed_pos)
 dist_to_p4 = dist_to_particle(pos, 3)
 print("Distances to particle 4:", dist_to_p4)
 
-t, y, v = integrate_orbits(masses, pos, velocity, (0, 10), 0.01)
+t, y, v = integrate_orbits(masses, pos, velocity, (0, 100), 0.1)
 plt.figure(figsize=(8, 6))
 for i in range(len(masses)):
     plt.plot(y[i, 0], y[i, 1], label=f'Particle {i+1}')
