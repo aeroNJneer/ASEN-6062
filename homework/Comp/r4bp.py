@@ -132,7 +132,7 @@ print(transformed_pos)
 dist_to_p4 = dist_to_particle(pos, 3)
 print("Distances to particle 4:", dist_to_p4)
 
-t, y, v = integrate_orbits(masses, pos, velocity, (0, 100), 0.1)
+t, y, v = integrate_orbits(masses, pos, velocity, (0, 50), 0.01)
 plt.figure(figsize=(8, 6))
 for i in range(len(masses)):
     plt.plot(y[i, 0], y[i, 1], label=f'Particle {i+1}')
@@ -142,6 +142,13 @@ plt.title('Orbits of Particles')
 plt.legend()
 plt.grid()
 plt.axis('equal')
+plt.show()
+
+plt.figure(figsize=(8, 6))
+plt.plot(y[3,0], y[3,1], label='Particle 4 Orbit')
+plt.xlabel('x')
+plt.ylabel('y') 
+plt.title('Orbit of Particle 4')
 plt.show()
 
 plt.figure(figsize=(8, 6))

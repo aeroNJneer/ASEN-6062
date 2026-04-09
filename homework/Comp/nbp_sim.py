@@ -335,8 +335,8 @@ def simulate_nbp(initial_positions, initial_velocities, masses, t_span, dt):
         args=(masses,),
         t_eval=t_eval,
         method='Radau',
-        rtol=1e-10,
-        atol=1e-12,
+        rtol=1e-8,
+        atol=1e-10,
         max_step=dt,
     )
 
@@ -1269,7 +1269,7 @@ if __name__ == '__main__':
         status = f"BELOW {', '.join(below)} → UNSTABLE" if below else "above all → stable"
         print(f"  pert={pert:.3f}:  C_J = {cj:.6f}  {status}")
 
-    LagrangeCC([m1,m2,m3], pert=0.05, n_orbits=100, steps_per_orbit=20, test_particle=True)
+    LagrangeCC([m1,m2,m3], pert=0.05, n_orbits=100, steps_per_orbit=100, test_particle=True)
  #   problem_2a(n_orbits=2)
 #    problem_2b(n_orbits=0.1)
 #    problem_2c(n_orbits=4, eccentricity=0.3)
