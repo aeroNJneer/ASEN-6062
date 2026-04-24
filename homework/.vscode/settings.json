@@ -1,0 +1,7 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "repr(c[\\\"source\\\"][0][:80])": true,
+        "c[\\\"source\\\"][0][:80]": true,
+        "nb[": true
+    }
+}
